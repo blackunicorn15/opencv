@@ -84,14 +84,10 @@ macro(ocv_check_environment_variables)
   endforeach()
 endmacro()
 
-macro(ocv_path_join result_var P1 P2)
-  string(REGEX REPLACE "^[/]+" "" P2 "${P2}")
-  if("${P1}" STREQUAL "")
-    if("${P2}" STREQUAL "")
-      set(${result_var} ".")
-    else()
-      set(${result_var} "${P2}")
-    endif()
+macro(ocv_path_join result_var P1 P2_)
+  string(REGEX REPLACE "^[/]+" "" P2 "${P2_}")
+  if("${P1}" STREQUAL "" OR "${P1}" STREQUAL ".")
+    set(${result_var} "${P2}")
   elseif("${P1}" STREQUAL "/")
     set(${result_var} "/${P2}")
   elseif("${P2}" STREQUAL "")
@@ -99,6 +95,11 @@ macro(ocv_path_join result_var P1 P2)
   else()
     set(${result_var} "${P1}/${P2}")
   endif()
+  string(REGEX REPLACE "([/\\]?)[\\.][/\\]" "\\1" ${result_var} "${${result_var}}")
+  if("${${result_var}}" STREQUAL "")
+    set(${result_var} ".")
+  endif()
+  #message(STATUS "'${P1}' '${P2_}' => '${${result_var}}'")
 endmacro()
 
 # rename modules target to world if needed
@@ -110,16 +111,29 @@ macro(_ocv_fix_target target_var)
   endif()
 endmacro()
 
+function(ocv_is_opencv_directory result_var dir)
+  get_filename_component(__abs_dir "${dir}" ABSOLUTE)
+  if("${__abs_dir}" MATCHES "^${OpenCV_SOURCE_DIR}"
+      OR "${__abs_dir}" MATCHES "^${OpenCV_BINARY_DIR}"
+      OR (OPENCV_EXTRA_MODULES_PATH AND "${__abs_dir}" MATCHES "^${OPENCV_EXTRA_MODULES_PATH}"))
+    set(${result_var} 1 PARENT_SCOPE)
+  else()
+    set(${result_var} 0 PARENT_SCOPE)
+  endif()
+endfunction()
+
+
 # adds include directories in such way that directories from the OpenCV source tree go first
 function(ocv_include_directories)
   ocv_debug_message("ocv_include_directories( ${ARGN} )")
   set(__add_before "")
   foreach(dir ${ARGN})
-    get_filename_component(__abs_dir "${dir}" ABSOLUTE)
-    if("${__abs_dir}" MATCHES "^${OpenCV_SOURCE_DIR}"
-        OR "${__abs_dir}" MATCHES "^${OpenCV_BINARY_DIR}"
-        OR (OPENCV_EXTRA_MODULES_PATH AND "${__abs_dir}" MATCHES "^${OPENCV_EXTRA_MODULES_PATH}"))
+    ocv_is_opencv_directory(__is_opencv_dir "${dir}")
+    if(__is_opencv_dir)
       list(APPEND __add_before "${dir}")
+    elseif(CMAKE_COMPILER_IS_GNUCXX AND NOT CMAKE_CXX_COMPILER_VERSION VERSION_LESS "6.0" AND
+           dir MATCHES "/usr/include$")
+      # workaround for GCC 6.x bug
     else()
       include_directories(AFTER SYSTEM "${dir}")
     endif()
@@ -127,15 +141,28 @@ function(ocv_include_directories)
   include_directories(BEFORE ${__add_before})
 endfunction()
 
+function(ocv_append_target_property target prop)
+  get_target_property(val ${target} ${prop})
+  if(val)
+    set(val "${val} ${ARGN}")
+    set_target_properties(${target} PROPERTIES ${prop} "${val}")
+  else()
+    set_target_properties(${target} PROPERTIES ${prop} "${ARGN}")
+  endif()
+endfunction()
+
 # adds include directories in such way that directories from the OpenCV source tree go first
 function(ocv_target_include_directories target)
   _ocv_fix_target(target)
   set(__params "")
+  if(CMAKE_COMPILER_IS_GNUCXX AND NOT CMAKE_CXX_COMPILER_VERSION VERSION_LESS "6.0" AND
+      ";${ARGN};" MATCHES "/usr/include;")
+    return() # workaround for GCC 6.x bug
+  endif()
   foreach(dir ${ARGN})
     get_filename_component(__abs_dir "${dir}" ABSOLUTE)
-    if("${__abs_dir}" MATCHES "^${OpenCV_SOURCE_DIR}"
-        OR "${__abs_dir}" MATCHES "^${OpenCV_BINARY_DIR}"
-        OR (OPENCV_EXTRA_MODULES_PATH AND "${__abs_dir}" MATCHES "^${OPENCV_EXTRA_MODULES_PATH}"))
+    ocv_is_opencv_directory(__is_opencv_dir "${dir}")
+    if(__is_opencv_dir)
       list(APPEND __params "${__abs_dir}")
     else()
       list(APPEND __params "${dir}")
@@ -804,7 +831,7 @@ function(ocv_add_library target)
   add_library(${target} ${ARGN} ${cuda_objs})
 
   # Add OBJECT library (added in cmake 2.8.8) to use in compound modules
-  if (NOT CMAKE_VERSION VERSION_LESS "2.8.8"
+  if (NOT CMAKE_VERSION VERSION_LESS "2.8.8" AND OPENCV_ENABLE_OBJECT_TARGETS
       AND NOT OPENCV_MODULE_${target}_CHILDREN
       AND NOT OPENCV_MODULE_${target}_CLASS STREQUAL "BINDINGS"
       AND NOT ${target} STREQUAL "opencv_ts"
